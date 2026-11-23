@@ -20,11 +20,12 @@ services:
       STUB: ${STUB:-4}
     volumes:
       - ./data:/data:ro
+      - ./cache:/cache
     networks:
       global_frontend_net:
         aliases:
           - ${WEB_NETWORK_ALIAS:-gleisy-web}
-    
+
 networks:
   global_frontend_net:
     external: true

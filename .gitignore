@@ -29,6 +29,7 @@
 *.tgz
 *.zip
 /data/
+/cache/
 /out/
 gtfs_fp2026_20261118.zip
 
