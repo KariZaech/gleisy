@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gleisbelegung</title>
+<style>
+  :root { --row-h: 40px; --head-h: 44px; --label-w: 64px; --bg: #fafafa; --grid: #e3e3e3; --grid-hour: #b9b9b9; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Bahnschrift, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: #222; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 24px; padding: 12px 18px;
+           background: #fff; border-bottom: 1px solid #ddd; position: sticky; top: 0; z-index: 5; }
+  h1 { margin: 0; font-size: 24px; font-weight: 700; }
+  .sub { color: #666; font-size: 13px; }
+  .controls { display: flex; align-items: center; gap: 16px; font-size: 13px; flex-wrap: wrap; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 12px;
+          border: 1px solid #ccc; cursor: pointer; user-select: none; font-size: 12px; background: #fff; }
+  .chip .sw { width: 14px; height: 10px; border-radius: 2px; }
+  .chip.off { opacity: .35; text-decoration: line-through; }
+  .wrap { display: flex; margin: 12px 18px; background: #fff; border: 1px solid #ddd; border-radius: 6px; overflow: hidden; }
+  .labels { flex: 0 0 var(--label-w); border-right: 1px solid #ccc; background: #f3f3f3; }
+  .labels .head { height: var(--head-h); border-bottom: 1px solid #ccc; font-size: 11px; color: #666;
+                  display: flex; align-items: flex-end; justify-content: center; padding-bottom: 4px; }
+  .labels .trk { display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px;
+                 border-bottom: 1px solid #ddd; }
+  .scroller { flex: 1; overflow-x: auto; position: relative; }
+  svg text { font-family: inherit; }
+  .bar { cursor: default; }
+  .bar:hover rect.body { stroke: #000; stroke-width: 1.5; }
+  #tip { position: fixed; pointer-events: none; background: #222; color: #fff; font-size: 12px; line-height: 1.45;
+         padding: 8px 10px; border-radius: 6px; max-width: 360px; display: none; z-index: 10; box-shadow: 0 2px 8px #0004; }
+  #tip b { color: #ffd54a; }
+  footer { margin: 0 18px 18px; font-size: 11px; color: #888; }
+  select, input[type=range] { vertical-align: middle; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="title">Gleisbelegung</h1>
+    <div class="sub" id="subtitle"></div>
+  </div>
+  <div class="controls">
+    <label>Zoom <input type="range" id="zoom" min="2" max="14" step="1" value="5"></label>
+    <label>Pfeile
+      <select id="arrowMode">
+        <option value="neighbour">zeigen Richtung Herkunft / Ziel</option>
+        <option value="travel">zeigen Fahrtrichtung</option>
+      </select>
+    </label>
+  </div>
+  <div class="legend" id="legend"></div>
+</header>
+
+<div class="wrap">
+  <div class="labels" id="labels"></div>
+  <div class="scroller" id="scroller"><svg id="chart"></svg></div>
+</div>
+<footer id="footer"></footer>
+<div id="tip"></div>
+
+<script>
+const DATA = /*__DATA__*/null;
+
+// ---- colours per category (from BrigSimple.xlsx, plus a few extras)
+const COLORS = {
+  R: "#FF8F8F", S: "#FF8F8F", SN: "#FF8F8F", PE: "#C00000",
+  RE: "#C5E0B4",
+  IR: "#9DC3E6",
+  IC: "#2E75B6", ICN: "#2E75B6",
+  EC: "#7030A0", EN: "#7030A0", NJ: "#7030A0", ICE: "#7030A0", TGV: "#7030A0", RJX: "#7030A0",
+  B: "#BFBFBF", OTHER: "#BFBFBF",
+};
+const colorOf = c => COLORS[c] || COLORS.OTHER;
+const textOn = hex => {
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? "#111" : "#fff";
+};
+const ARROWS = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+const arrow = deg => deg == null ? "" : ARROWS[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+const hhmm = m => { if (m == null) return ""; const h = Math.floor(m / 60) % 24, mi = m % 60;
+                    return String(h).padStart(2, "0") + ":" + String(mi).padStart(2, "0"); };
+const mm = m => m == null ? "" : String(m % 60).padStart(2, "0");
+const COMPASS = ["N", "NO", "O", "SO", "S", "SW", "W", "NW"];
+const compass = deg => deg == null ? "–" : COMPASS[Math.round(deg / 45) % 8];
+
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+};
+
+const state = { hidden: new Set(), ppm: 5, arrowMode: "neighbour" };
+const ROW_H = 40, HEAD_H = 44, FONT = 11;
+const _ctx = document.createElement("canvas").getContext("2d");
+const textW = (txt, size = FONT, bold = false) => {
+  _ctx.font = `${bold ? "700 " : ""}${size}px Bahnschrift, "Segoe UI", system-ui, sans-serif`;
+  return _ctx.measureText(txt).width;
+};
+
+function init() {
+  if (!DATA) { document.body.innerHTML = "<p style='padding:20px'>Keine Daten – Seite mit build.py erzeugen.</p>"; return; }
+  document.getElementById("title").textContent = `Gleisbelegung ${DATA.station}`;
+  document.getElementById("subtitle").textContent = `${DATA.weekday}, ${DATA.date} · ${DATA.bars.length} Belegungen`;
+  document.title = `Gleisbelegung ${DATA.station} ${DATA.date}`;
+  document.getElementById("footer").innerHTML =
+    `Quelle: ${DATA.source} (Soll-Fahrplan GTFS, opentransportdata.swiss) · erzeugt ${DATA.generated} · ` +
+    `durchgezogen = Durchgangszug / Block-ID, gestrichelt = Wende geschätzt (gleiches Gleis), blass = ohne Partner`;
+
+  const cats = [...new Set(DATA.bars.map(b => b.cat))].sort();
+  const lg = document.getElementById("legend");
+  for (const c of cats) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.innerHTML = `<span class="sw" style="background:${colorOf(c)}"></span>${c}`;
+    chip.onclick = () => { state.hidden.has(c) ? state.hidden.delete(c) : state.hidden.add(c);
+                           chip.classList.toggle("off"); render(); };
+    lg.appendChild(chip);
+  }
+  document.getElementById("zoom").oninput = e => { state.ppm = +e.target.value; render(); };
+  document.getElementById("arrowMode").onchange = e => { state.arrowMode = e.target.value; render(); };
+  render();
+}
+
+function sideText(b) {
+  const flip = state.arrowMode === "travel";
+  const L = b.in ? `${b.in.code} ${arrow(b.in.brg == null ? null : b.in.brg + (flip ? 180 : 0))} ${mm(b.in.t)}` : "";
+  const R = b.out ? `${mm(b.out.t)} ${arrow(b.out.brg)} ${b.out.code}` : "";
+  let top = b.label;
+  if (b.in && b.out && b.in.no !== b.out.no) top += ` ${b.in.no}›${b.out.no}`;
+  else top += ` ${(b.in || b.out).no}`;
+  return { L, R, top };
+}
+
+// assign bars of one track to non-overlapping lanes (labels included)
+function lanes(bars, ppm) {
+  const laneEnd = [];
+  for (const b of bars) {
+    const t = sideText(b);
+    const padL = (textW(t.L) + 10) / ppm;
+    const padR = (textW(t.R) + 10) / ppm;
+    const topW = (textW(t.top, FONT - 1, true) + 8) / ppm;
+    const s = b.start - padL, e = Math.max(b.end + padR, b.start + topW);
+    let lane = laneEnd.findIndex(x => x <= s);
+    if (lane < 0) { lane = laneEnd.length; laneEnd.push(e); } else laneEnd[lane] = e;
+    b._lane = lane;
+  }
+  return Math.max(1, laneEnd.length);
+}
+
+function render() {
+  const ppm = state.ppm;
+  const bars = DATA.bars.filter(b => !state.hidden.has(b.cat));
+  const all = DATA.bars;
+  const t0 = Math.floor(all.reduce((m, b) => Math.min(m, b.start), Infinity) / 60) * 60;
+  const t1 = Math.ceil(all.reduce((m, b) => Math.max(m, b.end), -Infinity) / 60) * 60;
+  const X = m => (m - t0) * ppm;
+  const width = (t1 - t0) * ppm + 20;
+
+  // rows
+  const rows = [];
+  let y = HEAD_H;
+  for (const trk of DATA.tracks) {
+    const tb = bars.filter(b => b.track === trk).sort((a, b) => a.start - b.start);
+    const n = lanes(tb, ppm);
+    rows.push({ trk, y, h: n * ROW_H, bars: tb });
+    y += n * ROW_H;
+  }
+  const height = y + 4;
+
+  // left labels
+  const lab = document.getElementById("labels");
+  lab.innerHTML = `<div class="head" style="height:${HEAD_H}px">Gleis</div>` +
+    rows.map(r => `<div class="trk" style="height:${r.h}px">${r.trk}</div>`).join("");
+
+  const svg = document.getElementById("chart");
+  svg.innerHTML = "";
+  svg.setAttribute("width", width); svg.setAttribute("height", height);
+
+  // row backgrounds
+  rows.forEach((r, i) => el("rect", { x: 0, y: r.y, width, height: r.h, fill: i % 2 ? "#fbfbfb" : "#fff" }, svg));
+  rows.forEach(r => el("line", { x1: 0, x2: width, y1: r.y + r.h, y2: r.y + r.h, stroke: "#ddd" }, svg));
+
+  // time grid
+  const step = ppm >= 8 ? 5 : ppm >= 4 ? 10 : 30;
+  for (let m = t0; m <= t1; m += step) {
+    const isHour = m % 60 === 0;
+    el("line", { x1: X(m), x2: X(m), y1: isHour ? 0 : HEAD_H - 10, y2: height,
+                 stroke: isHour ? "#b9b9b9" : "#ececec" }, svg);
+    if (isHour) {
+      const t = el("text", { x: X(m) + 4, y: 18, "font-size": 16, "font-weight": 700 }, svg);
+      t.textContent = String(Math.floor(m / 60) % 24);
+    } else {
+      const t = el("text", { x: X(m) + 2, y: HEAD_H - 4, "font-size": 9, fill: "#888" }, svg);
+      t.textContent = mm(m);
+    }
+  }
+  el("line", { x1: 0, x2: width, y1: HEAD_H, y2: HEAD_H, stroke: "#ccc" }, svg);
+
+  // "now" marker if the page shows today
+  const now = new Date();
+  if (now.toISOString().slice(0, 10) === DATA.date) {
+    const nm = now.getHours() * 60 + now.getMinutes();
+    if (nm >= t0 && nm <= t1) el("line", { x1: X(nm), x2: X(nm), y1: 0, y2: height, stroke: "#e00", "stroke-width": 2 }, svg);
+  }
+
+  // bars
+  for (const r of rows) {
+    for (const b of r.bars) {
+      const t = sideText(b);
+      const by = r.y + b._lane * ROW_H;
+      const x1 = X(b.start), w = Math.max(6, X(b.end) - x1);
+      const col = colorOf(b.cat);
+      const g = el("g", { class: "bar" }, svg);
+      const faint = b.pairing === "terminating" || b.pairing === "originating";
+      el("rect", { class: "body", x: x1, y: by + 15, width: w, height: 16, rx: 2, fill: col,
+                   "fill-opacity": faint ? 0.45 : 1,
+                   stroke: b.pairing === "turnaround" ? "#333" : "none",
+                   "stroke-dasharray": b.pairing === "turnaround" ? "4 2" : "" }, g);
+      // incoming category differs on a turnaround -> colour the left half accordingly
+      if (b.inCat && b.inCat !== b.cat)
+        el("rect", { x: x1, y: by + 15, width: w / 2, height: 16, rx: 2, fill: colorOf(b.inCat) }, g);
+      const top = el("text", { x: x1 + 1, y: by + 11, "font-size": FONT - 1, "font-weight": 700, fill: "#333" }, g);
+      top.textContent = t.top;
+      if (t.L) { const e = el("text", { x: x1 - 3, y: by + 27, "font-size": FONT, "text-anchor": "end" }, g); e.textContent = t.L; }
+      if (t.R) { const e = el("text", { x: x1 + w + 3, y: by + 27, "font-size": FONT }, g); e.textContent = t.R; }
+      if (w > 60 && b.in && b.out) {
+        const e = el("text", { x: x1 + w / 2, y: by + 27, "font-size": FONT - 1, "text-anchor": "middle",
+                               fill: textOn(col) }, g);
+        e.textContent = `${b.out.t - b.in.t}'`;
+      }
+      g.addEventListener("mousemove", ev => showTip(ev, b));
+      g.addEventListener("mouseleave", hideTip);
+    }
+  }
+}
+
+const tip = document.getElementById("tip");
+function showTip(ev, b) {
+  const how = { through: "Durchgangszug", block: "Wende (Block-ID)", turnaround: "Wende (geschätzt)",
+                terminating: "endet hier", originating: "beginnt hier" }[b.pairing];
+  let h = `<b>Gleis ${b.track}</b> · ${how}<br>`;
+  if (b.in) h += `An <b>${hhmm(b.in.t)}</b> ${b.in.label} ${b.in.no} von ${b.in.name}` +
+                 (b.in.via ? `<br>&nbsp;&nbsp;über ${b.in.via} (aus ${compass(b.in.brg)})` : "") + "<br>";
+  if (b.out) h += `Ab <b>${hhmm(b.out.t)}</b> ${b.out.label} ${b.out.no} nach ${b.out.name}` +
+                  (b.out.via ? `<br>&nbsp;&nbsp;über ${b.out.via} (nach ${compass(b.out.brg)})` : "");
+  if (b.in && b.out) h += `<br>Belegung ${b.out.t - b.in.t} min`;
+  tip.innerHTML = h; tip.style.display = "block";
+  const x = Math.min(ev.clientX + 14, window.innerWidth - 370);
+  tip.style.left = x + "px"; tip.style.top = (ev.clientY + 14) + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+init();
+</script>
+</body>
+</html>
