@@ -9,6 +9,7 @@ x-logging: &default-logging
 services:
   web:
     build: .
+    container_name: ${COMPOSE_PROJECT_NAME:-gleisy}_web
     restart: unless-stopped
     environment:
       GTFS_FILE: ${GTFS_FILE:-/data/gtfs.zip}
