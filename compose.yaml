@@ -1,0 +1,30 @@
+name: ${COMPOSE_PROJECT_NAME:-gleisy}
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    environment:
+      GTFS_FILE: ${GTFS_FILE:-/data/gtfs.zip}
+      STATION: ${STATION:?Set STATION in .env}
+      DATE: ${DATE:-}
+      ALL_MODES: ${ALL_MODES:-false}
+      MAX_TURN: ${MAX_TURN:-45}
+      STUB: ${STUB:-4}
+    volumes:
+      - ./data:/data:ro
+    networks:
+      global_frontend_net:
+        aliases:
+          - ${WEB_NETWORK_ALIAS:-gleisy-web}
+    
+networks:
+  global_frontend_net:
+    external: true
+    name: ${FRONTEND_NETWORK_NAME:-global_frontend_net}
